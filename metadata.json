@@ -1,0 +1,5 @@
+{
+  "name": "TextPurify",
+  "description": "Aplikasi pembersih teks cerdas untuk merapikan spasi, baris kosong, dan format tanpa mengubah konten asli.",
+  "requestFramePermissions": []
+}

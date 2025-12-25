@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { 
   ArrowRight, 
   Copy, 
@@ -8,7 +8,8 @@ import {
   AlignLeft,
   FileText,
   Undo2,
-  Redo2
+  Redo2,
+  Zap
 } from 'lucide-react';
 import { cleanTextWithGemini } from './services/geminiService';
 import { CleaningOptions } from './types';
@@ -17,7 +18,7 @@ import { Header } from './components/Header';
 import { useUndoRedo } from './hooks/useUndoRedo';
 
 const App: React.FC = () => {
-  // Input uses a debounce to avoid saving every keystroke, but we force save on Clear/Paste if needed
+  // Input uses a debounce to avoid saving every keystroke to history
   const {
     value: input,
     set: setInput,
@@ -28,7 +29,7 @@ const App: React.FC = () => {
     reset: resetInput
   } = useUndoRedo('', { debounce: 800 });
 
-  // Output saves every generation step (no debounce needed as updates are discrete)
+  // Output saves every generation step
   const {
     value: output,
     set: setOutput,
@@ -39,12 +40,15 @@ const App: React.FC = () => {
     reset: resetOutput
   } = useUndoRedo('');
 
-  const [isCleaning, setIsCleaning] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [copied, setCopied] = React.useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [autoClean, setAutoClean] = useState(true);
   
-  // New state for granular options
-  const [options, setOptions] = React.useState<CleaningOptions>({
+  // Track latest request to handle race conditions
+  const lastRequestTime = useRef<number>(0);
+
+  const [options, setOptions] = useState<CleaningOptions>({
     normalizeSpaces: true,
     removeBlankLines: true,
     fixBrokenLines: true,
@@ -53,22 +57,36 @@ const App: React.FC = () => {
 
   const outputRef = useRef<HTMLTextAreaElement>(null);
 
-  const handleClean = async () => {
-    if (!input.trim()) return;
+  // Centralized cleaning function
+  const triggerCleaning = async (text: string, currentOptions: CleaningOptions) => {
+    if (!text.trim()) return;
+
+    const requestId = Date.now();
+    lastRequestTime.current = requestId;
 
     setIsCleaning(true);
     setError(null);
-    // Note: We don't clear output here to avoid a blank history step if we wanted to undo.
-    // But typically we want the new result to replace the old view, effectively adding to history.
 
     try {
-      const cleaned = await cleanTextWithGemini(input, options);
-      setOutput(cleaned, true); // Force history save for generated output
+      const cleaned = await cleanTextWithGemini(text, currentOptions);
+      
+      // Only apply if this is the latest request
+      if (lastRequestTime.current === requestId) {
+        setOutput(cleaned, true); 
+      }
     } catch (err: any) {
-      setError(err.message || "Terjadi kesalahan sistem.");
+      if (lastRequestTime.current === requestId) {
+        setError(err.message || "Terjadi kesalahan sistem.");
+      }
     } finally {
-      setIsCleaning(false);
+      if (lastRequestTime.current === requestId) {
+        setIsCleaning(false);
+      }
     }
+  };
+
+  const handleClean = () => {
+    triggerCleaning(input, options);
   };
 
   const handleCopy = () => {
@@ -80,12 +98,7 @@ const App: React.FC = () => {
 
   const handleClear = () => {
     if (!input) return;
-    setInput('', true); // Force history save so we can undo the clear
-    resetOutput(''); // Usually clearing input resets output too, or should we keep output history? 
-    // Let's reset output for clarity, or user can clear output separately?
-    // The prompt implies cleaning process. Let's just clear input. 
-    // If I clear input, output usually stays until I clean again.
-    // Let's clear output to be clean.
+    setInput('', true);
     setOutput('', true);
     setError(null);
   };
@@ -94,8 +107,26 @@ const App: React.FC = () => {
     setOptions(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  // Auto-clean effect
+  useEffect(() => {
+    if (!autoClean) return;
+
+    const timer = setTimeout(() => {
+      if (!input.trim()) {
+        if (output) setOutput('', true);
+        return;
+      }
+      triggerCleaning(input, options);
+    }, 1200); // 1.2s delay to wait for typing to finish
+
+    return () => clearTimeout(timer);
+  }, [input, options, autoClean]);
+
   useEffect(() => {
     if (output && !isCleaning && outputRef.current) {
+      // Only scroll to top if it's a fresh manual clean or significant change
+      // For live preview, constantly jumping to top might be annoying if user is reading?
+      // But user is typing in input, output is just preview.
       outputRef.current.scrollTop = 0;
     }
   }, [output, isCleaning]);
@@ -155,6 +186,24 @@ const App: React.FC = () => {
         {/* Middle Control Panel */}
         <div className="flex-none flex md:flex-col items-center justify-center gap-4 py-2 md:py-0 md:w-56 z-10">
           <div className="w-full space-y-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+            {/* Auto Clean Toggle */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2 text-slate-700">
+                <div className={`p-1.5 rounded-md ${autoClean ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-400'}`}>
+                  <Zap size={14} fill={autoClean ? "currentColor" : "none"} />
+                </div>
+                <span className="text-sm font-semibold">Live Preview</span>
+              </div>
+              <button 
+                onClick={() => setAutoClean(!autoClean)}
+                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-2 ${autoClean ? 'bg-indigo-600' : 'bg-slate-200'}`}
+                role="switch"
+                aria-checked={autoClean}
+              >
+                <span aria-hidden="true" className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${autoClean ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+            </div>
+
             <div className="space-y-3">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider block mb-2">Opsi Pembersihan</label>
               
@@ -219,7 +268,7 @@ const App: React.FC = () => {
                 className="w-full"
                 icon={<Wand2 size={16} />}
               >
-                {isCleaning ? 'Memproses...' : 'Rapikan Teks'}
+                {isCleaning ? 'Memproses...' : 'Rapikan Manual'}
               </Button>
             </div>
           </div>
@@ -286,11 +335,10 @@ const App: React.FC = () => {
           
           <div className="flex-1 relative w-full h-full">
             {isCleaning && (
-               <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] z-10 flex items-center justify-center">
+               <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] z-10 flex items-center justify-center transition-opacity duration-200">
                  <div className="flex flex-col items-center gap-3 animate-pulse">
                    <div className="h-2 w-48 bg-indigo-200 rounded-full"></div>
                    <div className="h-2 w-32 bg-indigo-200 rounded-full"></div>
-                   <div className="h-2 w-56 bg-indigo-200 rounded-full"></div>
                  </div>
                </div>
             )}
